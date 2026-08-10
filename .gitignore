@@ -2,3 +2,13 @@
 cbom.cdx.json
 pqcbom.sarif
 pq-readiness-badge.json
+
+# Secrets. The action reads only GitHub-supplied vars (INPUT_*, GITHUB_OUTPUT) and
+# needs no credentials, so this is prophylactic — but this repo is consumed by other
+# people's CI, so a leaked credential here would be maximally visible.
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
