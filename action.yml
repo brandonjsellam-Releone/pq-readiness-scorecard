@@ -21,6 +21,10 @@ inputs:
     description: 'Comma-separated path globs to exclude (e.g. test-fixtures/,examples/,**/*.golden). Also readable from .pqcbomignore lines containing "/" or prefixed "path:". Excluded paths are counted in the step summary, never silently dropped.'
     required: false
     default: ''
+  strict:
+    description: 'Ignore the in-tree .pqcbomignore entirely. That file is read from INSIDE the scanned tree, so on a gating push/pull_request workflow its suppression rules are supplied by the code under review. Recommended (true) whenever this Action gates a build. The workflow-level `exclude` input still applies.'
+    required: false
+    default: 'false'
 outputs:
   grade:
     description: 'Post-Quantum Readiness grade (A–F)'

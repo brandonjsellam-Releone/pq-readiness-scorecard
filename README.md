@@ -18,11 +18,12 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: brandonjsellam-Releone/pq-readiness-scorecard@v1
         with:
           path: .
           fail-on: broken-classical      # fail the build on classically-broken crypto
+          strict: true                   # gating workflow: ignore any in-tree .pqcbomignore (see below)
           # min-grade: B                  # optional: fail below this grade
 ```
 
@@ -34,6 +35,7 @@ jobs:
 | `fail-on` | `broken-classical` | Comma-separated risk classes that fail the build (`broken-classical,quantum-broken,quantum-weakened`) |
 | `min-grade` | `` (off) | Fail below this grade (A–F) |
 | `exclude` | `` (off) | Comma-separated path globs to skip (e.g. `test-fixtures/,examples/`). Also readable from `.pqcbomignore` lines containing `/`. Excluded paths are **counted in the step summary, never silently dropped**. |
+| `strict` | `false` | Ignore the in-tree `.pqcbomignore` entirely. **Set this on any workflow that gates a build** — see [Scan suppression is a supply-chain surface](#scan-suppression-is-a-supply-chain-surface). `exclude` still applies. |
 
 The step summary also flags **harvest-now-decrypt-later** urgency: key-establishment findings (KEM/DH/ECDH and RSA
 *key transport* such as RSA-OAEP or static-RSA TLS suites) are the most time-urgent migrations — recorded ciphertext
@@ -57,6 +59,42 @@ Grover) · MD5 / SHA-1 / RC4 / 3DES / Blowfish / deprecated TLS / NTLM / WEP (cl
 (quantum-resistant). It also flags **broken PQ candidates** — SIKE/SIDH (Castryck–Decru 2022) and GeMSS — so a
 project that *thinks* it migrated isn't left with a false sense of safety. Reads declared crypto libraries, numeric
 OIDs (certs/ASN.1), and base64/PEM key/cert blobs too.
+
+## Scan suppression is a supply-chain surface
+
+The suppression mechanisms — the `.pqcbomignore` file and inline `pqcbom-ignore` markers — live **inside the tree
+being scanned**. In the deployment this Action is designed for (`on: [push, pull_request]`, gating the build), that
+tree *is* the code under review. A pull request can therefore ship its own suppression policy alongside the code it
+wants hidden: adding `path: src/crypto/` or a bare `MD5` line to `.pqcbomignore` silences findings about the very
+change being reviewed, and the gate goes green. This is the standard in-tree-config problem that affects every SAST
+tool with a repo-local ignore file — but you should know it applies here, not discover it after a bad merge.
+
+Two mitigations, both on by default or one line away:
+
+**1. Suppression is never silent.** Every run prints a **Suppression disclosure** section to the console *and* the job
+step summary — unconditionally, even when nothing is suppressed, so its absence is itself a red flag. It lists every
+active rule with the **source it came from** (`.pqcbomignore` vs. the workflow's own `exclude` input), every path the
+scan skipped, every finding the algo/risk allowlist dropped, and the `file:line` of every inline `pqcbom-ignore`
+marker — plus the total count of suppressed occurrences. If a `.pqcbomignore` inside the scanned tree suppressed
+anything, the run also emits a `::warning::` annotation, visible on the check itself.
+
+**2. `strict: true` disables the in-tree ignore file.** On a gating workflow, set it:
+
+```yaml
+      - uses: brandonjsellam-Releone/pq-readiness-scorecard@v1
+        with:
+          fail-on: broken-classical
+          strict: true                        # .pqcbomignore in the scanned tree is ignored entirely
+          exclude: test-fixtures/,examples/   # legitimate excludes now live in the WORKFLOW, not in the PR
+```
+
+The `exclude` input still works under `strict`, because it is set in the workflow file — which a pull request from a
+fork cannot change, and which an in-repo change modifies visibly, under whatever branch protection you already have.
+Move your legitimate excludes there and the gate can no longer be silenced by the diff it is judging.
+
+Inline `pqcbom-ignore` markers are still honored under `strict` (they sit on the exact line of the finding, so they
+are visible in the diff), but every one of them is listed by `file:line` in the disclosure. `strict` defaults to
+`false` so that non-gating, informational scans keep the adoption escape hatch.
 
 ## Honest posture
 
