@@ -9,17 +9,22 @@ jobs:
       contents: read
       security-events: write   # to upload SARIF to the Security tab
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to a full commit SHA (a tag is mutable and can be repointed at new code).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - id: pqc
         uses: brandonjsellam-Releone/pq-readiness-scorecard@v1
         with:
           path: .
           fail-on: broken-classical
+          # This workflow GATES the build on untrusted pull requests, so the scanned tree must not be allowed to supply
+          # its own scan-suppression policy: `strict: true` ignores any .pqcbomignore inside the checked-out repo.
+          # Put legitimate excludes in this workflow instead (`exclude: test-fixtures/,examples/`) — a PR can't edit it.
+          strict: true
 
       - name: Upload SARIF to the Security tab
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
         with:
           sarif_file: ${{ steps.pqc.outputs.sarif-file }}
 

@@ -52,6 +52,11 @@
  * header), flags "key material present — verify the inner algorithm" as classical-hybrid-ok (never overclaims
  * quantum-broken on an unparsed file). ext-matched-but-no-magic files surface as summary.keystores_unverified. Plus
  * text PEM private-key headers (OpenSSH/PGP). Binary layer is walker/Node-only (the browser paste-scan never sees it).
+ * v0.14 (suppression transparency — supply chain): `.pqcbomignore` is read from INSIDE the scanned tree, so in a gating
+ * `on: [push, pull_request]` workflow the suppression policy is supplied by the code under review. Fix: (a) the complete
+ * active-rule inventory is recorded with its SOURCE (summary.suppression.rules / .inline_sites / .allowlist_hits /
+ * .excluded_path_samples) and printed by the runner, so nothing is silently silenced; (b) opts.noIgnoreFile (the Action's
+ * `strict` input) ignores the in-tree file entirely — the workflow's own `exclude` input still applies.
  * Self-test: node pqcbom.mjs
  */
 const RULES = [
@@ -384,14 +389,14 @@ export function scanText(filename, text) {
   const found = new Map(); // algo -> { ..., count, code_count, comment_count, lines:[] }
   const jwtFound = new Map(); // v0.11.1: decoded JWT-header findings (kept separate so 'context: encoded' is preserved)
   const pyMode = /\.pyi?$/i.test(String(filename)); // v0.13: treat Python triple-quoted docstrings as comment-context
-  let open = null, suppressed = 0;
+  let open = null, suppressed = 0; const suppressedLines = new Set(); // v0.14: WHICH lines were silenced, not just how many
   for (let i = 0; i < lines.length; i++) {
     const { regions, endOpen } = commentRegions(lines[i], open, pyMode); open = endOpen;
     const ignoreLine = IGNORE_MARK.test(lines[i]);
     for (const r of RULES) {
       const idx = lines[i].search(r.re); // full-line scan -> code is never hidden
       if (idx === -1) continue;
-      if (ignoreLine) { suppressed += 1; continue; } // honor the inline ignore: counted, not graded, not listed
+      if (ignoreLine) { suppressed += 1; suppressedLines.add(i + 1); continue; } // honor the inline ignore: counted + LOCATED, not graded
       const ctx = inComment(idx, regions) ? 'comment' : 'code';
       const f = found.get(r.algo) || { algo: r.algo, family: r.family, risk: r.risk, rec: r.rec, count: 0, code_count: 0, comment_count: 0, lines: [] };
       f.count += 1; if (ctx === 'code') f.code_count += 1; else f.comment_count += 1;
@@ -401,7 +406,7 @@ export function scanText(filename, text) {
     }
     // v0.11.1: JWT/JOSE header decode per line — same comment/ignore/line semantics as the inline rules
     for (const { cls, idx } of classifyJwtLine(lines[i])) {
-      if (ignoreLine) { suppressed += 1; continue; }
+      if (ignoreLine) { suppressed += 1; suppressedLines.add(i + 1); continue; }
       const ctx = inComment(idx, regions) ? 'comment' : 'code';
       const f = jwtFound.get(cls.algo) || { algo: cls.algo, family: cls.family, risk: cls.risk, rec: cls.rec, count: 0, code_count: 0, comment_count: 0, lines: [] };
       f.count += 1; if (ctx === 'code') f.code_count += 1; else f.comment_count += 1;
@@ -430,6 +435,7 @@ export function scanText(filename, text) {
     if (f.hndl) f.urgency = 'harvest-now';
   }
   out.suppressed = suppressed; // per-file inline-suppressed occurrence count (array property; read in scanFiles)
+  out.suppressedLines = [...suppressedLines]; // v0.14: the exact lines an inline marker silenced (array property; read in scanFiles)
   return out;
 }
 
@@ -457,17 +463,29 @@ export function scanFiles(files, opts = {}) {
   // the grade stays a pure function of ALL findings (Evidence-Pack verification recomputes identically).
   if (Array.isArray(opts.extraFindings) && opts.extraFindings.length) findings = findings.concat(opts.extraFindings);
   let suppressed = per.reduce((n, a) => n + (a.suppressed || 0), 0); // inline `pqcbom-ignore` hits
+  // v0.14 (supply-chain transparency): suppression must never be SILENT. A gating workflow reads suppression rules out
+  // of the very tree it is reviewing, so record WHICH rule silenced WHAT — the caller (run.mjs) prints all of it.
+  const inline_sites = []; // {file, line} for every line an inline `pqcbom-ignore` marker silenced
+  per.forEach((a, i) => { for (const line of (a.suppressedLines || [])) inline_sites.push({ file: files[i].name, line }); });
   // allowlist: opts.ignoreAlgos (or a .pqcbomignore file via scanDirectory) — accept findings by exact algo label OR
   // risk class (case-insensitive). Accepted findings are DROPPED from grading + listing, counted in summary.suppressed.
   const igList = (opts.ignoreAlgos instanceof Set ? [...opts.ignoreAlgos] : Array.isArray(opts.ignoreAlgos) ? opts.ignoreAlgos : []).map((s) => String(s).toLowerCase());
+  const allowlist_hits = []; // {rule, algo, risk, file, count} for every finding the allowlist dropped
   if (igList.length) {
     const ig = new Set(igList);
-    findings = findings.filter((f) => { if (ig.has(f.algo.toLowerCase()) || ig.has(f.risk.toLowerCase())) { suppressed += f.count; return false; } return true; });
+    findings = findings.filter((f) => {
+      const rule = ig.has(f.algo.toLowerCase()) ? f.algo.toLowerCase() : ig.has(f.risk.toLowerCase()) ? f.risk.toLowerCase() : null;
+      if (rule) { suppressed += f.count; allowlist_hits.push({ rule, algo: f.algo, risk: f.risk, file: f.file, count: f.count }); return false; }
+      return true;
+    });
   }
   const summary = {
     files_scanned: files.length,
     ...riskTally(findings, opts.gradeContext),
     suppressed, // occurrences accepted via inline marker or allowlist (not graded) — surfaced for transparency
+    // v0.14: the AUDIT TRAIL behind `suppressed`. `rules` is filled in by scanDirectory (which knows where the rules
+    // came from: the in-tree .pqcbomignore vs the workflow's own `exclude` input).
+    suppression: { rules: [], inline_sites, allowlist_hits },
     comment_mentions: findings.reduce((n, f) => n + (f.comment_count || 0), 0), // crypto named only in comments/docs
     by_confidence: { // the triage breakdown (tool-derived; a human assessor confirms)
       likely: findings.filter((f) => f.confidence === 'likely').length,
@@ -594,20 +612,31 @@ export async function scanDirectory(dir, opts = {}) {
   //   algo/risk allowlist — any other line (unchanged: an algo LABEL or RISK CLASS to accept)
   // Path excludes are the standard SAST escape hatch (test fixtures, vendored rule tables, generated corpora) —
   // opt-in, and every excluded path is COUNTED in summary.excluded_paths so a gate reviewer sees the scan was narrowed.
+  // v0.14 SUPPLY-CHAIN NOTE: `.pqcbomignore` is read from INSIDE the tree being scanned. In the intended deployment —
+  // a gating `on: [push, pull_request]` workflow — that tree is the code under review, so a pull request can add its
+  // own suppression lines. Two mitigations, both here: (1) every rule is RECORDED with its source and printed by the
+  // caller, so suppression is never silent; (2) opts.noIgnoreFile (the Action's `strict` input) ignores the in-tree
+  // file entirely — the workflow's own `exclude` input still applies, because that lives in the workflow, not the PR.
   let ignoreAlgos = opts.ignoreAlgos ? [...(opts.ignoreAlgos instanceof Set ? opts.ignoreAlgos : opts.ignoreAlgos)] : [];
   const excludePats = Array.isArray(opts.excludePaths) ? [...opts.excludePaths] : [];
+  const rules = []; // {kind, pattern, source} — the complete active-suppression inventory
+  for (const p of excludePats) rules.push({ kind: 'path-exclude', pattern: p, source: 'exclude input' });
+  for (const a of ignoreAlgos) rules.push({ kind: 'allowlist', pattern: String(a), source: 'ignoreAlgos option' });
+  let ignoreFilePresent = false;
   try {
     const ig = readFileSync(join(dir, '.pqcbomignore'), 'utf8');
-    for (const raw of ig.split(/\r?\n/)) {
+    ignoreFilePresent = true;
+    if (!opts.noIgnoreFile) for (const raw of ig.split(/\r?\n/)) {
       const l = raw.replace(/#.*$/, '').trim(); if (!l) continue;
-      if (/^path:/i.test(l)) excludePats.push(l.replace(/^path:/i, '').trim());
-      else if (l.includes('/')) excludePats.push(l);
-      else ignoreAlgos.push(l);
+      if (/^path:/i.test(l)) { const p = l.replace(/^path:/i, '').trim(); excludePats.push(p); rules.push({ kind: 'path-exclude', pattern: p, source: '.pqcbomignore' }); }
+      else if (l.includes('/')) { excludePats.push(l); rules.push({ kind: 'path-exclude', pattern: l, source: '.pqcbomignore' }); }
+      else { ignoreAlgos.push(l); rules.push({ kind: 'allowlist', pattern: l, source: '.pqcbomignore' }); }
     }
   } catch { /* no allowlist file — fine */ }
   const excludeRes = excludePats.map(globToRe).filter(Boolean);
   const relOf = (p) => relative(dir, p).split(/[\\/]/).join('/');
   let excludedPaths = 0, skippedOutputs = 0;
+  const excludedList = []; // the actual paths dropped (capped for output size; the count above stays exact)
   const isExcluded = (p) => excludeRes.length > 0 && excludeRes.some((re) => re.test(relOf(p)));
   // include code/config by extension AND dependency manifests by filename (so the dependency layer fires for
   // requirements.txt / go.mod / pom.xml / Gemfile / *.csproj etc., which have no code-extension)
@@ -618,7 +647,7 @@ export async function scanDirectory(dir, opts = {}) {
       const p = join(d, name);
       let st; try { st = lstatSync(p); } catch (e) { skipped.push(p); continue; }
       if (st.isSymbolicLink()) { skipped.push(p); continue; } // do not follow symlinks (cycle/out-of-tree safe)
-      if (isExcluded(p)) { excludedPaths += 1; continue; }    // v0.10 path exclude (prunes whole dirs; counted)
+      if (isExcluded(p)) { excludedPaths += 1; if (excludedList.length < 50) excludedList.push(relOf(p)); continue; } // v0.10 path exclude (prunes whole dirs; counted + named)
       if (st.isDirectory()) { walk(p); continue; }
       if (OUTPUT_ARTIFACT.test(name)) { skippedOutputs += 1; continue; } // v0.10 never re-eat our own reports
       // v0.12: binary keystores are read as bytes (header only), double-gated (ext + magic), never text-scanned
@@ -632,6 +661,9 @@ export async function scanDirectory(dir, opts = {}) {
   res.summary.files_scanned += keystoreFindings.length; // keystores we examined (header-read) count as scanned files
   if (skipped.length) res.summary.skipped_paths = skipped.length;   // surfaced, never silent
   if (excludedPaths) res.summary.excluded_paths = excludedPaths;    // paths dropped by the opt-in exclude list
+  // v0.14: the full suppression audit trail — rules + where they came from + whether the in-tree file was honored.
+  res.summary.suppression = { ...res.summary.suppression, rules, excluded_path_samples: excludedList,
+    ignore_file: { path: '.pqcbomignore', present: ignoreFilePresent, honored: ignoreFilePresent && !opts.noIgnoreFile }, strict: !!opts.noIgnoreFile };
   if (skippedOutputs) res.summary.skipped_outputs = skippedOutputs; // our own prior scan artifacts (always skipped)
   if (keystoresUnverified) res.summary.keystores_unverified = keystoresUnverified; // ext matched but no magic (renamed/corrupt) — never a finding, surfaced
   return res;
@@ -953,6 +985,40 @@ async function selfTest() {
       // 3) opts.excludePaths + a no-slash pattern matches that name as a path segment
       const r3 = await scanDirectory(root, { excludePaths: ['app.js'] });
       ok(r3.summary.excluded_paths === 2 && !r3.findings.some((f) => f.algo === 'RSA'), 'v0.10: opts.excludePaths name-only pattern excludes the file (counted alongside the ignore-file dir)');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+
+  // --- v0.14: suppression transparency + strict mode. THREAT: `.pqcbomignore` is read from inside the scanned tree, so
+  //     in a gating push/pull_request workflow an untrusted change can add rules that silence findings about itself. ---
+  {
+    const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const root = mkdtempSync(join(tmpdir(), 'pqcbom-s-'));
+    try {
+      writeFileSync(join(root, 'app.js'), 'const k = RSA.generate(2048); hash = MD5;');
+      mkdirSync(join(root, 'sneaky'));
+      writeFileSync(join(root, 'sneaky', 'bad.js'), 'RC4 and 3DES live here');
+      // the attacker's PR ships its own suppression policy alongside the code it hides
+      writeFileSync(join(root, '.pqcbomignore'), '# added by the PR under review\nsneaky/\nMD5\n');
+      const d = await scanDirectory(root);
+      const s = d.summary.suppression;
+      ok(s.ignore_file.present === true && s.ignore_file.honored === true && s.strict === false, 'v0.14: default mode reports the in-tree .pqcbomignore as present AND honored');
+      ok(s.rules.some((r) => r.kind === 'path-exclude' && r.pattern === 'sneaky/' && r.source === '.pqcbomignore'), 'v0.14: the path-exclude rule is recorded with its source (.pqcbomignore), not just counted');
+      ok(s.rules.some((r) => r.kind === 'allowlist' && r.pattern === 'MD5' && r.source === '.pqcbomignore'), 'v0.14: the algo-allowlist rule is recorded with its source');
+      ok(s.excluded_path_samples.includes('sneaky'), 'v0.14: the excluded path is NAMED, so a reviewer sees what the scan skipped');
+      ok(s.allowlist_hits.some((h) => h.rule === 'md5' && h.algo === 'MD5' && h.count >= 1), 'v0.14: allowlist-dropped findings are itemised (rule -> algo/risk/file/count)');
+      // strict mode: the in-tree file is ignored ENTIRELY, so the hidden findings come back and the gate sees them
+      const strict = await scanDirectory(root, { noIgnoreFile: true });
+      ok(strict.summary.suppression.ignore_file.present === true && strict.summary.suppression.ignore_file.honored === false && strict.summary.suppression.strict === true, 'v0.14: strict mode reports the in-tree file as present but NOT honored');
+      ok(strict.summary.suppression.rules.length === 0, 'v0.14: strict mode activates no in-tree suppression rules');
+      ok(strict.findings.some((f) => f.algo === 'RC4') && strict.findings.some((f) => f.algo === 'MD5'), 'v0.14: strict mode re-surfaces the findings the in-tree ignore file had hidden (RC4 behind a path exclude, MD5 behind an allowlist)');
+      // the workflow's OWN exclude input still applies under strict (it lives in the workflow, not in the PR)
+      const strictWithInput = await scanDirectory(root, { noIgnoreFile: true, excludePaths: ['sneaky/'] });
+      ok(!strictWithInput.findings.some((f) => f.algo === 'RC4') && strictWithInput.summary.suppression.rules.some((r) => r.source === 'exclude input'), 'v0.14: strict mode still honours the workflow-supplied exclude input (recorded as source "exclude input")');
+      // inline markers are LOCATED, not just counted
+      const inl = scanFiles([{ name: 'x.js', text: 'ok = 1;\nk = RSA.gen(); // pqcbom-ignore: accepted' }]);
+      ok(inl.summary.suppression.inline_sites.some((h) => h.file === 'x.js' && h.line === 2), 'v0.14: an inline pqcbom-ignore records file+line, so a reviewer can find every silenced line');
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 
