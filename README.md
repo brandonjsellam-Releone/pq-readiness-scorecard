@@ -99,9 +99,20 @@ are visible in the diff), but every one of them is listed by `file:line` in the 
 ## Honest posture
 
 Lexical scan — findings are **leads to verify, not a complete inventory** and **not a certification**. Algorithm
-names denote the public standards they're based on, not a CMVP/FIPS-140 validation. It won't fake a clean bill of
-health: a scan that examines zero files refuses to grade rather than reporting "A". Falcon is FN-DSA for the
+names denote the public standards they're based on, not a CMVP/FIPS-140 validation. Falcon is FN-DSA for the
 forthcoming FIPS 206 (in development), not yet standardized.
+
+**A zero-file scan currently grades A/100.** This section previously claimed the opposite — that such a scan
+"refuses to grade rather than reporting 'A'" — and that is not what this Action does:
+`scanDirectory()` on an empty directory returns `files_scanned: 0` with `grade.letter: "A"`,
+`grade.score: 100`, and the badge and job summary render it as a green "Post-Quantum Readiness: A (100/100)".
+So a misconfigured `path`, an over-broad `exclude`, or a repo with no matching files produces a
+confident pass over nothing.
+
+Until the grader carries a zero-file guard, **check `files_scanned` in the job summary before believing a
+grade** — it is printed on every run. The guard belongs in the grading path in `run.mjs`; it is not written
+here because this project's governing policy bars authoring JavaScript, and a false claim removed is better
+than a false claim left standing while it waits for someone who can.
 
 ## Need a signed, auditor-ready report?
 
