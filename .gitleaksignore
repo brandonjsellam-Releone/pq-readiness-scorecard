@@ -1,0 +1,21 @@
+# gitleaks suppressions — FINGERPRINTS ONLY, never file or rule exclusions.
+#
+# A fingerprint is `commit:path:rule:line`, so suppressing one pins that exact finding in that exact
+# commit. A REAL key committed to the same file tomorrow still fails the scan. Excluding the path
+# (`pqcbom.mjs`) or the rule (`private-key`) would produce a check that no input could defeat —
+# which is the defect class this scanner exists to detect in other people's repositories.
+#
+# Describe the trigger; never paste it. Quoting the offending text verbatim reproduces the pattern
+# that fired the rule and makes the suppression file a finding of its own.
+
+# pqcbom.mjs:94 — a DETECTION REGEX, not a secret.
+# The line defines the pattern this scanner uses to recognise JWT ECDSA signature algorithms
+# (the ES-family identifiers). gitleaks sees crypto-shaped tokens and flags them; that is the
+# unavoidable cost of a crypto scanner whose source is a catalogue of crypto identifiers.
+04652d18288661d124471827353642980cff3c92:pqcbom.mjs:private-key:94
+
+# pqcbom.mjs:838 — SELF-TEST DATA.
+# Part of the in-file assertion suite: it builds a JOSE header token so the scanner's own
+# recognition can be checked against a known input. Base64 JOSE headers are public, fixed
+# structural values that encode an algorithm name and nothing else — there is no key here.
+04652d18288661d124471827353642980cff3c92:pqcbom.mjs:private-key:838
