@@ -499,18 +499,52 @@ export function scanFiles(files, opts = {}) {
   return { summary, grade, findings: findings.sort((a, b) => RISK_ORDER.indexOf(a.risk) - RISK_ORDER.indexOf(b.risk)) };
 }
 
-// A–F Post-Quantum Readiness Scorecard (the viral badge) + a 0–100 score
+// A–F Post-Quantum Readiness Scorecard (the viral badge) + a 0–100 score.
+// Vacuous input MUST NOT grade A/100 — a named gate that cannot fail is a defect.
+// gradeOf is the shared source of truth (library + Action + badge). CLI refuse
+// alone is not enough if this function still paints A.
+const UNGRADED = Object.freeze({
+  letter: null,
+  score: null,
+  ungraded: true,
+  label: 'Ungraded — no cryptographic evidence',
+  badge: 'PQ Readiness: ungraded',
+  error: 'refuse: empty, all-zero, or unrecognized input',
+});
+function tallyN(s, k) {
+  const v = s && s[k];
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+function isUngradable(s) {
+  if (!s || typeof s !== 'object') return true;
+  // files_scanned === 0 always refuses (even if tallies were stuffed).
+  if (Object.prototype.hasOwnProperty.call(s, 'files_scanned') && tallyN(s, 'files_scanned') === 0) return true;
+  const tallies = tallyN(s, 'broken_classical') + tallyN(s, 'quantum_broken') + tallyN(s, 'quantum_weakened') + tallyN(s, 'classical_hybrid_ok') + tallyN(s, 'quantum_safe');
+  // All-zero tallies with nothing recognized (no comment/suppressed signal) refuse —
+  // that is unrecognized paste, gradeOf({}), and a scanned file that matched no crypto.
+  // comment_mentions / suppressed mean the scanner DID recognize crypto and discounted
+  // it (gradeContext:code / allowlist) — that is not "unrecognized".
+  // files_scanned missing + non-zero tallies still grades (Evidence-Pack recompute).
+  const recognized = tallies + tallyN(s, 'comment_mentions') + tallyN(s, 'suppressed');
+  return recognized === 0;
+}
 export function gradeOf(s) {
+  if (isUngradable(s)) return { ...UNGRADED };
+  const broken_classical = tallyN(s, 'broken_classical');
+  const quantum_broken = tallyN(s, 'quantum_broken');
+  const quantum_weakened = tallyN(s, 'quantum_weakened');
+  const classical_hybrid_ok = tallyN(s, 'classical_hybrid_ok');
+  const quantum_safe = tallyN(s, 'quantum_safe');
   let score = 100;
-  score -= 40 * Math.min(s.broken_classical, 2);
-  score -= 12 * Math.min(s.quantum_broken, 5);
-  score -= 4 * Math.min(s.quantum_weakened, 5);
-  score -= 1 * Math.min(s.classical_hybrid_ok, 5);
+  score -= 40 * Math.min(broken_classical, 2);
+  score -= 12 * Math.min(quantum_broken, 5);
+  score -= 4 * Math.min(quantum_weakened, 5);
+  score -= 1 * Math.min(classical_hybrid_ok, 5);
   score = Math.max(0, score);
   let letter;
-  if (s.broken_classical > 0) letter = 'F';
-  else if (s.quantum_broken > 0) letter = s.quantum_safe >= s.quantum_broken ? 'C' : 'D';
-  else if (s.quantum_weakened > 0) letter = 'B';
+  if (broken_classical > 0) letter = 'F';
+  else if (quantum_broken > 0) letter = quantum_safe >= quantum_broken ? 'C' : 'D';
+  else if (quantum_weakened > 0) letter = 'B';
   else letter = 'A';
   const labels = { A: 'Post-Quantum Readiness', B: 'Quantum-weakened (Grover)', C: 'Migrating (hybrid present)', D: 'Quantum-vulnerable — migrate', F: 'Critical — broken crypto in use' };
   return { letter, score, label: labels[letter], badge: 'PQ Readiness: ' + letter };
@@ -522,7 +556,7 @@ export function toCycloneDX(report) {
   for (const f of report.findings) { const e = byAlgo.get(f.algo) || { ...f, occurrences: [] }; e.occurrences.push({ file: f.file, lines: f.lines }); if (f.hndl) e.hndl = true; byAlgo.set(f.algo, e); }
   return {
     bomFormat: 'CycloneDX', specVersion: '1.6', version: 1,
-    metadata: { tools: [{ vendor: 'TRELYAN', name: 'pqcbom', version: '0.2.0-draft' }], properties: [{ name: 'trelyan:quantum-grade', value: report.grade.letter }, { name: 'trelyan:quantum-score', value: String(report.grade.score) }] },
+    metadata: { tools: [{ vendor: 'TRELYAN', name: 'pqcbom', version: '0.2.0-draft' }], properties: [{ name: 'trelyan:quantum-grade', value: (report.grade && !report.grade.ungraded && report.grade.letter) || 'ungraded' }, { name: 'trelyan:quantum-score', value: (report.grade && !report.grade.ungraded && report.grade.score != null) ? String(report.grade.score) : 'ungraded' }] },
     components: [...byAlgo.values()].map((e) => ({
       type: 'cryptographic-asset', name: e.algo,
       cryptoProperties: { assetType: 'algorithm', algorithmProperties: { primitive: e.family }, nistQuantumSecurityLevel: e.risk === 'quantum-safe' ? 5 : 0 },
@@ -570,7 +604,7 @@ export function toSARIF(report, opts = {}) {
     runs: [{
       tool: { driver: { name: 'pqcbom', informationUri: 'https://trelyan.foundation', version: '0.2.0-draft', rules } },
       results,
-      properties: { 'trelyan:quantum-grade': report.grade.letter, 'trelyan:quantum-score': report.grade.score },
+      properties: { 'trelyan:quantum-grade': (report.grade && !report.grade.ungraded && report.grade.letter) || 'ungraded', 'trelyan:quantum-score': (report.grade && !report.grade.ungraded && report.grade.score != null) ? report.grade.score : 'ungraded' },
     }],
   };
 }
@@ -696,6 +730,34 @@ async function selfTest() {
   // grading: the vulnerable file -> F (MD5 broken); the safe file -> A
   ok(scanFiles([{ name: 'legacy.js', text: vulnerable }]).grade.letter === 'F', 'vulnerable file -> grade F (critical)');
   ok(scanFiles([{ name: 'modern.mjs', text: safe }]).grade.letter === 'A', 'all-PQ-safe file -> grade A');
+
+  // G1 / F6 / FAIL-TEST: empty, all-zero, and unrecognized paste must be observed to FAIL —
+  // never A/100. A test that still gets A/100 on zero files is itself a defect.
+  {
+    const refused = (g) => g && g.ungraded === true && g.letter !== 'A' && g.score !== 100 && g.letter == null && g.score == null;
+    const z0 = gradeOf({ files_scanned: 0, broken_classical: 0, quantum_broken: 0, quantum_weakened: 0, classical_hybrid_ok: 0, quantum_safe: 0 });
+    ok(refused(z0), 'FAIL-TEST: gradeOf(zero-file summary) must refuse — not A/100');
+    const zEmpty = gradeOf({});
+    ok(refused(zEmpty), 'FAIL-TEST: gradeOf({}) all-zero / empty summary must refuse — not A/100');
+    const zTallies = gradeOf({ files_scanned: 1, broken_classical: 0, quantum_broken: 0, quantum_weakened: 0, classical_hybrid_ok: 0, quantum_safe: 0 });
+    ok(refused(zTallies), 'FAIL-TEST: gradeOf(all-zero tallies) must refuse — not A/100');
+    const stuffed = gradeOf({ files_scanned: 0, quantum_safe: 99 });
+    ok(refused(stuffed), 'FAIL-TEST: gradeOf(files_scanned===0) refuses even if tallies are stuffed — not A/100');
+    const zScan = scanFiles([]);
+    ok(zScan.summary.files_scanned === 0 && refused(zScan.grade), 'FAIL-TEST: scanFiles([]) / empty input must refuse — not A/100');
+    const paste = scanFiles([{ name: 'paste.txt', text: 'The quick brown fox jumps over the lazy dog. Inventory count: 42.' }]);
+    ok(paste.summary.files_scanned === 1 && paste.findings.length === 0 && refused(paste.grade), 'FAIL-TEST: unrecognized non-empty paste must refuse — not A/100');
+  }
+  {
+    const { mkdtempSync, rmSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const empty = mkdtempSync(join(tmpdir(), 'pqcbom-empty-'));
+    try {
+      const r = await scanDirectory(empty);
+      ok(r.summary.files_scanned === 0 && r.grade.ungraded === true && r.grade.letter !== 'A' && r.grade.score !== 100, 'FAIL-TEST: empty directory scan must refuse — not A/100');
+    } finally { rmSync(empty, { recursive: true, force: true }); }
+  }
 
   // CycloneDX CBOM shape
   const cbom = toCycloneDX(scanFiles([{ name: 'legacy.js', text: vulnerable }]));
@@ -1020,6 +1082,20 @@ async function selfTest() {
       const inl = scanFiles([{ name: 'x.js', text: 'ok = 1;\nk = RSA.gen(); // pqcbom-ignore: accepted' }]);
       ok(inl.summary.suppression.inline_sites.some((h) => h.file === 'x.js' && h.line === 2), 'v0.14: an inline pqcbom-ignore records file+line, so a reviewer can find every silenced line');
     } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+
+  // Action + badge + policyGate must agree with gradeOf — a refuse in the library
+  // that the Action still paints A (or a gate that passes ungraded) is the same defect.
+  {
+    const { scorecardBadge, policyGate } = await import('./action-lib.mjs');
+    const g = gradeOf({ files_scanned: 0 });
+    const badge = scorecardBadge(g);
+    ok(badge.message === 'ungraded' && !/A \(100\)/.test(badge.message), 'FAIL-TEST: scorecardBadge on refuse must not paint A/100');
+    const gate = policyGate({ summary: { files_scanned: 0, broken_classical: 0, quantum_broken: 0, quantum_weakened: 0, classical_hybrid_ok: 0, quantum_safe: 0 }, grade: g }, { failOn: ['broken-classical'] });
+    ok(gate.pass === false && gate.violations.some((v) => /ungraded|refuse/i.test(v)), 'FAIL-TEST: policyGate must FAIL CLOSED on ungraded (not a silent pass)');
+    const pasteGrade = scanFiles([{ name: 'paste.txt', text: 'The quick brown fox jumps over the lazy dog. Inventory count: 42.' }]).grade;
+    ok(scorecardBadge(pasteGrade).message === 'ungraded', 'FAIL-TEST: badge path on unrecognized paste is ungraded, not A/100');
+    ok(policyGate({ summary: { files_scanned: 1 }, grade: pasteGrade }).pass === false, 'FAIL-TEST: policyGate on unrecognized paste must FAIL');
   }
 
   console.log('pqcbom self-test: ' + pass + ' pass, ' + fail + ' fail');

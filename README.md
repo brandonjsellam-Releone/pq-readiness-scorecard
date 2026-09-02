@@ -46,8 +46,8 @@ Hardcoded JWT/JOSE tokens are decoded (header segment only, never the payload) a
 
 | Output | Description |
 |---|---|
-| `grade` | Post-Quantum Readiness grade (A–F) |
-| `score` | Score 0–100 |
+| `grade` | Post-Quantum Readiness grade (A–F). Unset when the scan refuses to grade. |
+| `score` | Score 0–100. Unset when the scan refuses to grade. |
 | `sarif-file` | SARIF 2.1.0 report — upload with `github/codeql-action/upload-sarif` to see findings in the **Security** tab |
 | `cbom-file` | `cbom.cdx.json` — CycloneDX 1.6 CBOM |
 
@@ -102,17 +102,18 @@ Lexical scan — findings are **leads to verify, not a complete inventory** and 
 names denote the public standards they're based on, not a CMVP/FIPS-140 validation. Falcon is FN-DSA for the
 forthcoming FIPS 206 (in development), not yet standardized.
 
-**A zero-file scan currently grades A/100.** This section previously claimed the opposite — that such a scan
-"refuses to grade rather than reporting 'A'" — and that is not what this Action does:
-`scanDirectory()` on an empty directory returns `files_scanned: 0` with `grade.letter: "A"`,
-`grade.score: 100`, and the badge and job summary render it as a green "Post-Quantum Readiness: A (100/100)".
-So a misconfigured `path`, an over-broad `exclude`, or a repo with no matching files produces a
-confident pass over nothing.
+**A scan that cannot attest readiness refuses to grade.** `gradeOf` — the shared source of truth for the
+library, the Action, and the badge — fail-closes. It returns `{ ungraded: true, letter: null, score: null }`,
+never A/100, when:
 
-Until the grader carries a zero-file guard, **check `files_scanned` in the job summary before believing a
-grade** — it is printed on every run. The guard belongs in the grading path in `run.mjs`; it is not written
-here because this project's governing policy bars authoring JavaScript, and a false claim removed is better
-than a false claim left standing while it waits for someone who can.
+- `files_scanned === 0` (empty tree, misconfigured `path`, or over-broad `exclude`)
+- every risk tally is zero and nothing was recognized (all-zero / empty summary, including `gradeOf({})`)
+- the input is a non-empty paste or file that matches no cryptographic pattern
+
+The Action exits non-zero in those cases and does not write a green A badge or `grade=A` / `score=100`
+outputs. A file that *does* contain recognized post-quantum-safe cryptography still grades A;
+"we looked at nothing" and "we did not recognize anything" are not A. Mutation lock: `node pqcbom.mjs`
+(`FAIL-TEST: gradeOf(zero-file summary)`, `FAIL-TEST: gradeOf({})`, `FAIL-TEST: unrecognized non-empty paste`).
 
 ## Need a signed, auditor-ready report?
 

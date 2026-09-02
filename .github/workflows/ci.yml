@@ -21,27 +21,60 @@ jobs:
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: ${{ matrix.node }}
-      - name: Self-test (162 assertions)
+      - name: Self-test (including FAIL-TEST refuse-to-grade mutations)
         run: node pqcbom.mjs
       - name: Smoke — scanner produces CBOM/SARIF artifacts (no policy gate)
         env:
-          INPUT_PATH: examples
+          INPUT_PATH: fixtures/clean
           INPUT_FAIL-ON: ""
         run: |
           node run.mjs
           test -s cbom.cdx.json
           test -s pqcbom.sarif
+          # A named gate that cannot fail is a defect: this path has crypto, so it must grade, not refuse.
+          test -s pq-readiness-badge.json
+          ! grep -q '"ungraded"' pq-readiness-badge.json
 
-      # Neither step above executes policyGate, which is the Action's entire security
-      # function: `grep -c policyGate pqcbom.mjs` is 0, so the 152-assertion self-test never
-      # reaches action-lib.mjs, and the smoke step sets INPUT_FAIL-ON to "" so run.mjs's
-      # `if (failOn.length || minGrade)` branch is dead. examples/ holds one workflow file and
-      # zero crypto. Demonstrated: replacing `const all = configErrors.concat(violations)` in
-      # action-lib.mjs with `const all = []` - a gate that can never fail - leaves both steps
-      # green.
-      #
-      # Both directions are required. A gate that rejects everything passes the first of these
-      # and fails the second; only the pair shows it discriminates.
+      # gradeOf fail-closed: empty / unrecognized must be observed to FAIL (not A/100).
+      # examples/ is a workflow YAML with no cryptographic patterns — unrecognized input.
+      - name: Refuse to grade unrecognized input (not A/100)
+        env:
+          INPUT_PATH: examples
+          INPUT_FAIL-ON: ""
+        run: |
+          rm -f pq-readiness-badge.json cbom.cdx.json pqcbom.sarif
+          if node run.mjs; then
+            echo "::error::unrecognized tree was accepted as a grade (gate cannot fail)"
+            exit 1
+          fi
+          if [ -f pq-readiness-badge.json ]; then
+            echo "::error::refused scan still wrote a badge (must not paint A/100)"
+            exit 1
+          fi
+          echo "Action correctly refused unrecognized input"
+
+      - name: Refuse to grade an empty tree (not A/100)
+        env:
+          INPUT_PATH: /tmp/pqcbom-empty-scan
+          INPUT_FAIL-ON: ""
+        run: |
+          mkdir -p /tmp/pqcbom-empty-scan
+          rm -f pq-readiness-badge.json cbom.cdx.json pqcbom.sarif
+          if node run.mjs; then
+            echo "::error::empty tree graded instead of refused"
+            exit 1
+          fi
+          if [ -f pq-readiness-badge.json ]; then
+            echo "::error::refused empty scan still wrote a badge (must not paint A/100)"
+            exit 1
+          fi
+          echo "Action correctly refused empty tree"
+
+      # policyGate still needs both directions on REAL crypto (the refuse steps above
+      # prove empty/unrecognized fail closed; they do not prove the severity filter works).
+      # A gate that rejects everything passes the first of these and fails the second;
+      # only the pair shows it discriminates. Demonstrated: `const all = []` in
+      # action-lib.mjs makes the broken fixture go green while this pair goes red.
       - name: Policy gate must FAIL on classically-broken crypto
         env:
           INPUT_PATH: fixtures/broken

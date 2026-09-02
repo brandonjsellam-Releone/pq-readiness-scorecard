@@ -27,9 +27,9 @@ inputs:
     default: 'false'
 outputs:
   grade:
-    description: 'Post-Quantum Readiness grade (A–F)'
+    description: 'Post-Quantum Readiness grade (A–F). Not set when the scan refuses to grade (empty / all-zero / unrecognized).'
   score:
-    description: 'Post-Quantum Readiness score (0–100)'
+    description: 'Post-Quantum Readiness score (0–100). Not set when the scan refuses to grade (empty / all-zero / unrecognized).'
   sarif-file:
     description: 'Path to the SARIF 2.1.0 report (upload via github/codeql-action/upload-sarif to populate the Security tab)'
   cbom-file:
