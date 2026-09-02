@@ -2,7 +2,7 @@
  *  writes the shields badge endpoint, sets outputs/step-summary, and fails the build per policy. */
 import { scanDirectory, toCycloneDX, toSARIF } from './pqcbom.mjs';      // vendored (zero-dep) — see vendor.sh
 import { scorecardBadge, policyGate } from './action-lib.mjs';           // zero-dep subset of pqcbom-server (no @noble)
-import { writeFileSync, appendFileSync } from 'fs';
+import { writeFileSync, appendFileSync, existsSync, statSync } from 'fs';
 
 const path = process.env.INPUT_PATH || '.';
 const failOn = (process.env['INPUT_FAIL-ON'] ?? 'broken-classical').split(',').map((s) => s.trim()).filter(Boolean);
@@ -14,9 +14,21 @@ const excludePaths = (process.env.INPUT_EXCLUDE || '').split(',').map((s) => s.t
 // reviewed tree) still applies under strict. Off by default: adoption keeps the escape hatch, gates opt in.
 const strict = /^(1|true|yes|on)$/i.test((process.env.INPUT_STRICT || '').trim());
 
+// FAIL CLOSED on a bad target — a missing path must never scan nothing and emit A.
+if (!existsSync(path) || !statSync(path).isDirectory()) {
+  console.error(`::error::PQ Readiness: '${path}' is not a directory — refuse to grade (not A/100).`);
+  process.exit(2);
+}
+
 // CI gate grades on CODE occurrences (a comment that mentions "MD5" should not fail a build); the full report still
 // lists comment/doc mentions as 'informational'. (A one-time assessment uses the conservative total-count default.)
 const r = await scanDirectory(path, { gradeContext: 'code', excludePaths, noIgnoreFile: strict });
+// gradeOf is the source of truth: empty / all-zero / unrecognized must refuse here too,
+// not only in a CLI wrapper. Do not write A/100 artifacts or outputs.
+if (r.grade.ungraded || r.summary.files_scanned === 0) {
+  console.error(`::error::PQ Readiness: refuse to grade (${r.grade.label}; files_scanned=${r.summary.files_scanned}). Empty, all-zero, or unrecognized input cannot attest A/100.`);
+  process.exit(2);
+}
 writeFileSync('cbom.cdx.json', JSON.stringify(toCycloneDX(r), null, 2));
 writeFileSync('pq-readiness-badge.json', JSON.stringify(scorecardBadge(r.grade)));
 // SARIF for GitHub code-scanning — findings appear in the Security tab + as inline PR annotations (paths repo-relative)

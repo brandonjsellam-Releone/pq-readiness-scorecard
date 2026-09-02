@@ -9,13 +9,22 @@ const RISK_CLASSES = new Set(['broken-classical', 'quantum-broken', 'quantum-wea
 const VALID_GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
 
 // shields.io endpoint schema — README badge via https://img.shields.io/endpoint?url=<this JSON>. JSON only, no SVG.
+// Ungraded / refuse must never render as A/100 — same contract as gradeOf.
 export function scorecardBadge(grade) {
+  if (!grade || grade.ungraded || grade.letter == null) {
+    return { schemaVersion: 1, label: 'PQ Readiness', message: 'ungraded', color: 'lightgrey' };
+  }
   return { schemaVersion: 1, label: 'PQ Readiness', message: grade.letter + ' (' + grade.score + ')', color: GRADE_COLOR[grade.letter] || 'lightgrey' };
 }
 
 // CI policy gate: fail on banned risk classes and/or below a minimum grade. Fails CLOSED on a typo'd config
 // (an unknown risk class or invalid min-grade is a violation, not a silent pass).
 export function policyGate(report, policy = {}) {
+  // Fail closed on a refused grade. An ungraded report has zero risk tallies, so
+  // the fail-on loop below would otherwise pass — a named gate that cannot fail.
+  if (!report || !report.grade || report.grade.ungraded || report.grade.letter == null) {
+    return { pass: false, violations: ['ungraded: empty, all-zero, or unrecognized input (refuse to grade)'], configErrors: [] };
+  }
   const failOn = policy.failOn || ['broken-classical'];
   const violations = [], configErrors = [];
   for (const risk of failOn) {
