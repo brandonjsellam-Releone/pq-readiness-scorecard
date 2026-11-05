@@ -1,10 +1,21 @@
 # Post-Quantum Readiness Scorecard
 
-**Scan your repository for quantum-vulnerable cryptography, get an A–F readiness grade + a CycloneDX 1.6 CBOM
-(Cryptographic Bill of Materials), and optionally fail the build on broken crypto — in one CI step, no install.**
+> **Status: not recommended for gating builds.** Its A–F grade is a score computed from counts of lexical matches,
+> not an assessment of post-quantum readiness. Known defects:
+> - by default, algorithm names that appear only in comments count toward the grade;
+> - a zero-file scan grades A/100 (see [Honest posture](#honest-posture));
+> - the deprecated-TLS rule in `pqcbom.mjs` also matches TLS 1.3 written with an underscore (for example `TLSv1_3`),
+>   so a TLS 1.3 setting can be reported as classically broken TLS and can make `fail-on: broken-classical` fail the
+>   build.
+>
+> Treat every finding as a lead to verify, and do not rely on the grade.
+
+**Scan your repository for named quantum-vulnerable cryptography and get a CycloneDX 1.6 CBOM (Cryptographic Bill
+of Materials) in one CI step, no install.** It also prints an A–F grade and can fail the build on selected risk
+classes; see the status note above before relying on either.
 
 Regulators are starting to require a cryptographic inventory (CNSA 2.0, DORA, NIS2, EU CRA). This Action produces
-that inventory automatically on every push. Free and open-source (MIT). Zero dependencies — the scanner is vendored.
+lexical leads toward that inventory on every push; it is not a complete inventory. Free and open-source (MIT). Zero dependencies — the scanner is vendored.
 
 > Prefer to try it in your browser first (nothing uploaded)? → **https://throndar.ai/cbom**
 
@@ -46,7 +57,7 @@ Hardcoded JWT/JOSE tokens are decoded (header segment only, never the payload) a
 
 | Output | Description |
 |---|---|
-| `grade` | Post-Quantum Readiness grade (A–F) |
+| `grade` | A–F grade summarizing lexical matches; not an assessment (see the status note) |
 | `score` | Score 0–100 |
 | `sarif-file` | SARIF 2.1.0 report — upload with `github/codeql-action/upload-sarif` to see findings in the **Security** tab |
 | `cbom-file` | `cbom.cdx.json` — CycloneDX 1.6 CBOM |
